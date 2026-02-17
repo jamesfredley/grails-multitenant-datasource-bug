@@ -1,7 +1,6 @@
 # GormEnhancer.allQualifiers() Overrides Explicit Datasource for MultiTenant Entities
 
 **Grails Version**: 7.0.7  
-**GORM Version**: 7.1 (grails-datamapping-core)  
 **Severity**: Critical — silent data routing to wrong database
 
 ## Bug Description
@@ -51,7 +50,6 @@ Use `@Transactional(connection = 'secondary')` on Data Service abstract classes 
 - **Grails**: 7.0.7
 - **Spring Boot**: 3.5.10
 - **Groovy**: 4.0.30
-- **GORM**: 7.1 (grails-datamapping-core)
 - **JDK**: 17+
 
 ## Project Structure
