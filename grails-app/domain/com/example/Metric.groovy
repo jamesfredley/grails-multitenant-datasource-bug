@@ -17,6 +17,7 @@ class Metric implements MultiTenant<Metric> {
     Date dateCreated
 
     static mapping = {
+        tenantId name: 'tenantId'
         datasource 'secondary'
     }
 

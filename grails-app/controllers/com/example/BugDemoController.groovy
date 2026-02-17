@@ -1,61 +1,83 @@
 package com.example
 
 import grails.converters.JSON
+import groovy.sql.Sql
 import org.grails.datastore.gorm.GormEnhancer
-import org.grails.datastore.mapping.core.connections.ConnectionSource
 import org.grails.datastore.mapping.core.connections.ConnectionSourcesSupport
+
+import javax.sql.DataSource
 
 /**
  * Demonstrates the GormEnhancer.allQualifiers() bug.
  *
  * Visit http://localhost:8080/bugDemo/index to see the issue.
+ *
+ * The bug: when a domain class implements MultiTenant AND declares a specific
+ * datasource (e.g. datasource 'secondary'), allQualifiers() ignores the declared
+ * datasource and returns ALL datasources instead.
  */
 class BugDemoController {
 
+    DataSource dataSource            // Primary
+    DataSource dataSource_secondary  // Secondary
+
     def index() {
-        // 1. Show what datasources Metric DECLARES
-        def entity = grailsApplication.mappingContext.getPersistentEntity(Metric.name)
-        def declaredDatasources = ConnectionSourcesSupport.getConnectionSourceNames(entity)
-
-        // 2. Show what allQualifiers() actually returns
-        // (This is the bug — it expands to ALL datasources instead of preserving 'secondary')
-        def enhancer = new GormEnhancer(grailsApplication.mainContext.getBean('hibernateDatastore'))
-        def actualQualifiers = enhancer.allQualifiers(
-                grailsApplication.mainContext.getBean('hibernateDatastore'),
-                entity
-        )
-
-        // 3. Save a Metric via direct domain class call
         System.setProperty('gorm.tenantId', 'tenant1')
-        def metric = new Metric(name: 'test-metric', value: 42.0)
-        metric.save(flush: true, failOnError: true)
 
-        // 4. Try to find it on the secondary datasource
-        def foundOnSecondary = null
-        try {
-            foundOnSecondary = Metric.secondary.count()
-        } catch (Exception e) {
-            foundOnSecondary = "ERROR: ${e.message}"
-        }
+        def datastore = grailsApplication.mainContext.getBean('hibernateDatastore')
+        def enhancer = new GormEnhancer(datastore)
 
-        // 5. Check if it ended up on the default datasource instead
-        def foundOnDefault = null
-        try {
-            foundOnDefault = Metric.count()
-        } catch (Exception e) {
-            foundOnDefault = "ERROR: ${e.message}"
-        }
+        // --- Metric: MultiTenant + datasource 'secondary' (BUG TARGET) ---
+        def metricEntity = grailsApplication.mappingContext.getPersistentEntity(Metric.name)
+        def metricDeclared = ConnectionSourcesSupport.getConnectionSourceNames(metricEntity)
+        def metricActual = enhancer.allQualifiers(datastore, metricEntity)
+
+        // --- Item: non-MultiTenant, default datasource (CONTROL) ---
+        def itemEntity = grailsApplication.mappingContext.getPersistentEntity(Item.name)
+        def itemDeclared = ConnectionSourcesSupport.getConnectionSourceNames(itemEntity)
+        def itemActual = enhancer.allQualifiers(datastore, itemEntity)
+
+        // --- Table diagnostics: which tables ended up where ---
+        def primarySql = new Sql(dataSource)
+        def primaryTables = primarySql.rows(
+                "SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = 'PUBLIC'"
+        ).collect { it.TABLE_NAME }
+        primarySql.close()
+
+        def secondarySql = new Sql(dataSource_secondary)
+        def secondaryTables = secondarySql.rows(
+                "SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = 'PUBLIC'"
+        ).collect { it.TABLE_NAME }
+        secondarySql.close()
+
+        // --- Verdict ---
+        def qualifiersBugged = metricActual != metricDeclared
 
         def result = [
-                bug_description: 'GormEnhancer.allQualifiers() overrides explicit datasource for MultiTenant entities',
-                domain_class: 'Metric',
-                declared_datasource: declaredDatasources,
-                actual_qualifiers_from_allQualifiers: actualQualifiers,
-                expected_qualifiers: ['secondary'],
-                metric_saved: metric.id != null,
-                count_on_default_datasource: foundOnDefault,
-                count_on_secondary_datasource: foundOnSecondary,
-                verdict: 'If count_on_default > 0 and count_on_secondary == 0, the data was routed to the WRONG database'
+                metric: [
+                        implements_multi_tenant: true,
+                        declared_datasource: metricDeclared,
+                        allQualifiers_returns: metricActual,
+                        expected: metricDeclared,
+                        match: !qualifiersBugged
+                ],
+                item_control: [
+                        implements_multi_tenant: false,
+                        declared_datasource: itemDeclared,
+                        allQualifiers_returns: itemActual,
+                        expected: itemDeclared,
+                        match: itemActual == itemDeclared
+                ],
+                tables: [
+                        primary_db: primaryTables,
+                        secondary_db: secondaryTables
+                ],
+                bug_present: qualifiersBugged,
+                verdict: qualifiersBugged
+                        ? "BUG CONFIRMED: Metric declares datasource ${metricDeclared} but allQualifiers() returned ${metricActual}. The MultiTenant trait causes allQualifiers() to ignore the declared datasource and expand to ALL datasources. Compare with Item (non-MultiTenant control): declared ${itemDeclared}, allQualifiers() returned ${itemActual} — correct."
+                        : 'NO BUG: allQualifiers() correctly returned only the declared datasource.',
+                root_cause: 'GormEnhancer.allQualifiers() checks MultiTenant FIRST and returns ConnectionSource.ALL, overriding the explicit datasource declaration. Non-MultiTenant entities are unaffected.',
+                workaround: 'Use GormEnhancer.findStaticApi(DomainClass, "secondary") to explicitly route queries to the correct datasource, bypassing allQualifiers().'
         ]
 
         render result as JSON
